@@ -1,0 +1,111 @@
+# .github/workflows/sync-and-sanitize.yml
+
+name: Sync with Upstream and Sanitize Filenames
+
+on:
+  # 1. Run automatically every hour
+  schedule:
+    - cron: "10 2 * * *"
+
+  # 2. Allow manual runs from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  sync-and-sanitize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout your fork
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: 2. Set up Git user
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 3. Sync with the upstream repository
+        run: |
+          # IMPORTANT: Replace the URL with the original repository's URL
+          UPSTREAM_REPO="https://github.com/horselock/Jailbreaks.git"
+
+          echo "Preserving custom files..."
+          # Save our custom files before reset
+          cp .github/workflows/main.yml /tmp/main.yml
+          cp .github/README_PREPEND.md /tmp/README_PREPEND.md
+
+          echo "Adding upstream remote..."
+          git remote add upstream $UPSTREAM_REPO
+
+          echo "Fetching from upstream..."
+          git fetch upstream
+
+          echo "Resetting main branch to upstream/main..."
+          # Replace 'main' with the default branch name if it's different (e.g., 'master').
+          git checkout main
+          git reset --hard upstream/main
+
+          echo "Restoring workflow files..."
+          # Restore the .github structure and our files
+          mkdir -p .github/workflows
+          cp /tmp/main.yml .github/workflows/main.yml
+          cp /tmp/README_PREPEND.md .github/README_PREPEND.md
+
+          echo "Creating custom README..."
+          # Prepend our custom content to the upstream README
+          if [ -f "README.md" ]; then
+            cat .github/README_PREPEND.md README.md > README_NEW.md
+            mv README_NEW.md README.md
+          else
+            # If no upstream README exists, just use our prepend content
+            cp .github/README_PREPEND.md README.md
+          fi
+
+          # Stage the restored/modified files
+          git add .github README.md
+
+      - name: 4. Sanitize file and directory names
+        id: sanitize
+        run: |
+          echo "Starting filename sanitization..."
+          find . -depth -not -path './.git*' -print0 | while IFS= read -r -d '' path; do
+            dir=$(dirname "$path")
+            base=$(basename "$path")
+
+            if [ "$base" == "." ]; then
+              continue
+            fi
+
+            # Rule 1 & 2: Basic character replacement and removal
+            sanitized_base=$(echo "$base" | sed \
+              -e 's/[ |:]/_/g' \
+              -e 's/[^a-zA-Z0-9_.-]//g')
+
+            # Rule 3 & 4 (NEW): Collapse separators and remove trailing dots
+            sanitized_base=$(echo "$sanitized_base" | sed -E \
+              -e 's/[_-]{2,}/_/g' \
+              -e 's/\.$//' ) # <-- THIS IS THE NEW RULE
+
+            if [ "$base" != "$sanitized_base" ]; then
+              new_path="$dir/$sanitized_base"
+              if [ "$dir" == "." ]; then
+                new_path="$sanitized_base"
+              fi
+
+              echo "Renaming '$path' to '$new_path'"
+              git mv "$path" "$new_path"
+            fi
+          done
+          echo "Sanitization complete."
+
+      - name: 5. Commit and push changes
+        run: |
+          if git status --porcelain | grep .; then
+            echo "Changes detected, committing and pushing..."
+            git add -A
+            git commit -m "chore: Automatically sanitize filenames from upstream"
+            git push origin main --force
+          else
+            echo "No filename changes needed."
+          fi
